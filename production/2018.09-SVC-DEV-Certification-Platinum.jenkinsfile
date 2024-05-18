@@ -1,0 +1,69 @@
+pipeline {
+  agent {
+    node {
+      label 'shake-n-bake'
+    }
+  }
+
+  parameters {
+    string(name: 'NEW_VERSION', description: 'The new version to create', defaultValue: '<new name>')
+    string(name: 'PREVIOUS_VERSION', description: 'The previous version to retire',defaultValue: 'latest')
+    booleanParam(name: 'PROMPT_ENV_MODIFICATIONS', defaultValue: true, description: 'Prompt to verify environment modifications.')
+    booleanParam(name: 'PROMPT_ENV_VERIFICATION', defaultValue: false, description: 'Prompt to verify environment validity.')
+  }
+
+  stages {
+    stage ("Initializing") {
+      steps {
+        buildName "#${BUILD_NUMBER}-${params.NEW_VERSION}"
+      }
+    }
+    stage ("Shake and Bake") {
+      steps {
+        build job: 'shake-n-bake', propagate: true, wait: false, parameters: [
+        [$class: 'StringParameterValue', name: 'ENVIRONMENT', value: 'PRODUCTION'],
+        [$class: 'StringParameterValue', name: 'APPLICATION', value: '2018.09-SVC-DEV-Certification-Platinum'],
+        [$class: 'StringParameterValue', name: 'BASE_VERSION', value: 'Base'],
+        [$class: 'StringParameterValue', name: 'PREVIOUS_VERSION', value: "${params.PREVIOUS_VERSION}"],
+        [$class: 'StringParameterValue', name: 'NEW_VERSION', value: "${params.NEW_VERSION}"],
+        [$class: 'BooleanParameterValue', name: 'PROMPT_ENV_MODIFICATIONS', value: 'false'],
+        [$class: 'BooleanParameterValue', name: 'PROMPT_ENV_VERIFICATION', value: 'false'],
+        [$class: 'StringParameterValue', name: 'PREVIOUS_VERSION_OPERATION', value: 'DEACTIVATE'],
+        [$class: 'StringParameterValue', name: 'POOLING_INITIAL_SIZE', value: '1'],
+        [$class: 'StringParameterValue', name: 'POOLING_CONCURRENCY', value: '25'],
+        [$class: 'StringParameterValue', name: 'POOLING_POLICY', value: 'NONE'],
+        [$class: 'StringParameterValue', name: 'POOL_SIZE', value: '0'],
+	[$class: 'StringParameterValue', name: 'MAX_VERSION_POLICY_SIZE', value: '10'],
+        [$class: 'StringParameterValue', name: 'RESOURCE_LOCK_NAME', value: '-'],
+        [$class: 'StringParameterValue', name: 'FIXED_CONFIG_NAME', value: '2018.09-SVC-DEV-Certification-Platinum.yaml'],
+        [$class: 'TextParameterValue', name: 'PRIMARY_MASTER_CONFIG', value:
+'''---
+config:
+  domain: M18EC
+  millennium_username: system
+  millennium_password: burr1t0
+  masters:
+    - role: millennium-app
+      ip: 10.171.140.176
+      machine: ipm18ec
+    - role: millennium-db
+      ip: 10.171.140.177
+      machine: ipm18ecdb
+    - role: websphere-odr
+      ip: 10.171.140.178
+      machine: ipm18ecodr
+    - role: websphere-app
+      ip: 10.171.140.189
+      machine: ipm18ecapp
+    - role: fat-client
+      ip: 10.171.140.206
+      machine: ipm18ecwin
+    - role: deployment-manager
+      ip: 10.171.141.51
+      machine: ipm18ecwinmgr
+''']
+			  ]
+      }
+    }
+  }
+}

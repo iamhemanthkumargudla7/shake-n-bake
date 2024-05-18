@@ -1,0 +1,497 @@
+import groovy.json.JsonSlurperClassic
+import static java.util.Calendar.*
+import groovy.time.TimeCategory
+
+def static getMasterEnvironment(final script, final String application, final String version, final String url, final String token) {
+
+  def envListStr = script.sh(returnStdout: true, script: "java -jar eod-cli.jar environment list --app='${application}' --version='${version}' --token=${token} --host=${url}").trim()
+  script.echo "Environment List: ${envListStr}"
+  def envList = new JsonSlurperClassic().parseText(envListStr)
+
+  if (envList.size() > 1) {
+    throw new IllegalStateException("There are already [${envList.size()}] environments that exist for [${application} - ${version}]")
+  }
+
+  return envList[0]
+}
+
+def static provisionEnvironment(final script, final String application, final String version, final String description, final String url, final String token) {
+  def envObj = script.sh(returnStdout: true, script: "java -jar eod-cli.jar environment create --app='${application}' --version='${version}' --category='DevEnvironment' --reason='${description}' --token=${token} --host=${url}").trim()
+  script.echo "Provisioned Environment: ${envObj}"
+  def data = new JsonSlurperClassic().parseText(envObj)
+  return data
+}
+
+def static resetMaster(final script, final String application, final String version, final String eodEnvironment, final String url, final String token) {
+  script.sh """
+    java -jar eod-current-process.jar reset-master --app='${application}' --version='${version}' --environment='${eodEnvironment}' --wait --token=${token}
+  """
+  return getMasterEnvironment(script, application, version, url, token)
+}
+
+def static getApplication(final script, final String application, final String url, final String token) {
+
+  def appListStr = script.sh(returnStdout: true, script: "java -jar eod-cli.jar application inspect --app='${application}' --token=${token} --host=${url}").trim()
+  script.echo "Application: ${appListStr}"
+  def appList = new JsonSlurperClassic().parseText(appListStr)
+
+  if (appList.size() == 0) {
+    throw new IllegalStateException("Application [${application}] does not exist.")
+  }
+
+  return appList[0]
+}
+
+def static getLatestVersion(final script, final String application, final String url, final String token) {
+  def app = getApplication(script, application, url, token)
+
+  def conn = new URL(url + "/applications/${app.id}/versions/latest").openConnection();
+  conn.setRequestProperty("Authorization", "Bearer ${token}")
+  def response = conn.getResponseCode();
+
+  if (!200.equals(response)) {
+    throw new IllegalStateException("Unable to retrieve latest version for application [${app.name}][code=${response}].")
+  }
+
+  def results = new JsonSlurperClassic().parseText("${conn.getInputStream().getText()}")
+  return results.version;
+}
+
+def static getVersion(final script, final String application, final String version, final String url, final String token) {
+  def app = getApplication(script, application, url, token)
+
+  def conn = new URL(url + "/applications/${app.id}/versions?name=${version}").openConnection();
+  conn.setRequestProperty("Authorization", "Bearer ${token}")
+  def response = conn.getResponseCode();
+
+  if (!200.equals(response)) {
+    throw new IllegalStateException("Unable to retrieve version [${version}] for application [${app.name}][code=${response}].")
+  }
+
+  def results = new JsonSlurperClassic().parseText("${conn.getInputStream().getText()}")
+  return results.versions[0]?.version;
+}
+
+pipeline {
+    agent {
+      node {
+        label 'eod-process'
+      }
+    }
+
+    parameters {
+        choice(name: 'ENVIRONMENT', choices: ['STAGING', 'PRODUCTION'], description: 'Select which EOD environment to execute against')
+        string(name: 'NEW_VERSION', description: 'The name of the new version to create', defaultValue: '-')
+        booleanParam(name: 'SNAPSHOT_ONLY', defaultValue: false, description: 'Create a copy of the LATEST version and update the snapshots only.')
+        string(name: "SNAPSHOT_NAME", description: "The label of the actifio snapshots.", defaultValue: '-')
+        string(name: 'POOL_SIZE', description: 'The number of environments desired to be maintained in the application version pool', defaultValue: '0')
+    }
+
+    stages {
+        // Kicks off the current build process
+        stage ('Initializing') {
+          steps {
+            echo "Initializing parameters for environment ${params.ENVIRONMENT}"
+
+            script {
+              if ("${params.NEW_VERSION}" == "" || "${params.NEW_VERSION}" == "-") {
+                throw new IllegalStateException("The new VERSION cannot be empty or default to '-'.")
+              }
+
+              if ("${params.SNAPSHOT_NAME}" == "" || "${params.SNAPSHOT_NAME}" == "-") {
+                throw new IllegalStateException("The new SNAPSHOT_NAME cannot be empty nor '-'.")
+              }
+
+              int poolSize = Integer.parseInt("${params.POOL_SIZE}")
+              if (poolSize < 0) {
+                throw new IllegalStateException("POOL_SIZE [${params.POOL_SIZE}] must be positive.")
+              }
+
+              masterEnvFormatted = ""
+              validationEnvUUID = ""
+	            lockName = ""
+
+               if ("${params.ENVIRONMENT}" == "STAGING") {
+                echo 'Setting parameters for STAGING'
+                env.EOD_SERVICE_URL = "http://staging.ipdevenv.ip.devcerner.net/eod-service"
+                env.EOD_TOKEN = "Po7F6pn3FzxPtl60Atqb9lV19ngfgPddo3F5m661dAMqP3RFXi6ZvwHu8paiixsO2Umzy6DVp8kikv1B0yZfuoIi5ORisq2rV1s6kFhk9kUtexNNjmWGrak4dhGvtu92F5"
+                env.VRA_HOST = "vracrt.northamerica.cerner.net"
+                env.TEAMS_CHANNEL = "https://outlook.office.com/webhook/5cff0d1c-8f72-41b5-81bf-2235195f1164@fbc493a8-0d24-4454-a815-f4ca58e8c09d/IncomingWebhook/29f1f5106dea4ae48dea98b9e8624f0e/548b6cd9-0708-43db-89c4-bc6a4b95b271"
+                env.TEAMS_FAILURE_CHANNEL = "${env.TEAMS_CHANNEL}"
+                env.POOLING_STORY_ID = "2fe26f3e-32c3-4e05-8027-c8513dce77c6"
+                env.POOLING_TOKEN = "oP6zNcmz6xskdDm8pkQbK2bqih0g3TOkGK1lXIIU43PAKdUnvhFUF4gnD8Yrmj8FOYRsM9U2MgmXcqOWxSmN16D0DL1UNBRGFmNXpywHZPad76hhErziQMsFR5CSIXXgmr"
+                env.CHRONICLE_STORY_ID = "0af48177-4ab5-4995-b892-8f5e36826d2d"
+                env.CHRONICLE_STORY_SECRET = "7446785f-163a-45aa-b29b-93381925180c"
+                env.PREP_APPLICATION = "ABLGM-Abilities-Gold-Master"
+                env.PERF_APPLICATION = "ABLGM-Abilities-Gold-Master-Performance-Testing"
+                env.APP_ROLE = "orchestrator"
+                env.DB_ROLE = "orchestrator"
+              } else if ("${params.ENVIRONMENT}" == "PRODUCTION") {
+                echo 'Setting parameters for PRODUCTION'
+                env.EOD_SERVICE_URL = "http://ipdevenv.ip.devcerner.net/eod-service"
+                env.EOD_TOKEN = "Po7F6pn3FzxPtl60Atqb9lV19ngfgPddo3F5m661dAMqP3RFXi6ZvwHu8paiixsO2Umzy6DVp8kikv1B0yZfuoIi5ORisq2rV1s6kFhk9kUtexNNjmWGrak4dhGvtu92F5"
+                env.VRA_HOST = "vraprd.northamerica.cerner.net"
+                env.TEAMS_CHANNEL = "https://cernerprod.webhook.office.com/webhookb2/ccecd4ae-bc04-4a63-b962-c8c6186c66a7@fbc493a8-0d24-4454-a815-f4ca58e8c09d/IncomingWebhook/de62a82859a2442fa4126f4eb823f487/548b6cd9-0708-43db-89c4-bc6a4b95b271"
+                env.TEAMS_FAILURE_CHANNEL = "https://cernerprod.webhook.office.com/webhookb2/ccecd4ae-bc04-4a63-b962-c8c6186c66a7@fbc493a8-0d24-4454-a815-f4ca58e8c09d/IncomingWebhook/b4e9df1b0ab6492485b233111e094808/548b6cd9-0708-43db-89c4-bc6a4b95b271"
+                env.POOLING_STORY_ID = "1a3553e8-4b49-4977-8b4d-44a48c9e93ed"
+                env.POOLING_TOKEN = "PV1x9vkBmoymyU3dTPzNrYkM8pkReuXvDn3lhs6joUM9KBXuNKi9BXibMsk5yKu4phKNTLVTzuFjtJzQj0eO9Ai4SSxYMaLPdRTBgPiLTapMIu2E4Y2E6D3zY6Sgp0iIV2"
+                env.CHRONICLE_STORY_ID = "c7d3722b-f02b-431c-b1a7-628fe41e13ef"
+                env.CHRONICLE_STORY_SECRET = "b68d99bc-4d37-47bc-9696-3898311e9ff6"
+                env.PREP_APPLICATION = "ABLGM-Abilities-Gold-Master"
+                env.PERF_APPLICATION = "ABLGM-Abilities-Gold-Master-Performance-Testing"
+                env.APP_ROLE = "millennium-app"
+                env.DB_ROLE = "millennium-db"
+              } else {
+                currentBuild.result = 'ABORTED'
+                error("UNKNOWN ENVIRONMENT: ${params.ENVIRONMENT}")
+              }
+
+              env.LOCK_NAME = "ABLGM"
+            }
+
+            buildName "#${BUILD_NUMBER}-${params.NEW_VERSION}"
+
+            echo "EOD URL:       ${env.EOD_CLIENT_URL}"
+            echo "EOD PORT:      ${env.EOD_CLIENT_PORT}"
+            echo "vRealize URL:  ${env.VRA_HOST}"
+            echo "Teams Channel: ${env.TEAMS_CHANNEL}"
+	          echo "Lock Name:     ${env.LOCK_NAME}"
+
+          }
+        }
+        stage ('Installing Tools') {
+            steps {
+                artifactResolver artifacts: [
+                  artifact(
+                    groupId: 'com.cerner.abilities',
+                    artifactId: 'eod-cli',
+                    classifier: 'jar-with-dependencies',
+                    extension: 'jar',
+                    version: '1.3',
+                    targetFileName: './eod-cli.jar'
+                  ),
+                  artifact(
+                    groupId: 'com.cerner.abilitieslab',
+                    artifactId: 'eod-current-process',
+                    classifier: 'jar-with-dependencies',
+                    extension: 'jar',
+                    version: '1.41',
+                    targetFileName: './eod-current-process.jar'
+                  )
+                ],
+                targetDirectory: WORKSPACE
+            }
+        }
+
+        stage ('Resolve Input') {
+          steps {
+            sh """
+              java -jar eod-cli.jar application inspect --app='${env.PERF_APPLICATION}' --token=${env.EOD_TOKEN} --host=${EOD_SERVICE_URL}
+            """
+
+            sh """
+              java -jar eod-cli.jar application inspect --app='${env.PREP_APPLICATION}' --token=${env.EOD_TOKEN} --host=${EOD_SERVICE_URL}
+            """
+
+            sh """
+              java -jar eod-cli.jar version inspect --app='${env.PERF_APPLICATION}' --version='${params.NEW_VERSION}' --token=${env.EOD_TOKEN} --host=${EOD_SERVICE_URL}
+            """
+
+            sh """
+              java -jar eod-cli.jar version inspect --app='${env.PREP_APPLICATION}' --version='${params.NEW_VERSION}' --token=${env.EOD_TOKEN} --host=${EOD_SERVICE_URL}
+            """
+            script {
+
+              env.PREVIOUS_PERF_EOD_VERSION = getLatestVersion(this,"${env.PERF_APPLICATION}", "${EOD_SERVICE_URL}","${env.EOD_TOKEN}").name
+              env.PREVIOUS_PREP_EOD_VERSION = getLatestVersion(this,"${env.PREP_APPLICATION}", "${EOD_SERVICE_URL}","${env.EOD_TOKEN}").name
+
+              echo "ABLGM Prep - Previous Version:       ${env.PREVIOUS_PERF_EOD_VERSION}"
+              echo "ABLGM Test - Previous Version:       ${env.PREVIOUS_PREP_EOD_VERSION}"
+
+              if ("${env.PREVIOUS_PERF_EOD_VERSION}" == "${params.NEW_VERSION}") {
+                throw new IllegalStateException("The previous version matches the new version [${params.NEW_VERSION}].")
+              }
+            }
+          }
+        }
+
+        stage ('ABLGM Test - Environment Notification') {
+          steps {
+            script {
+              office365ConnectorSend message: "**_[${env.PERF_APPLICATION}] - ${params.NEW_VERSION}:_**  Shake and bake process has been started.\n\n\n\nPreparing to deactivate previous version ${env.PREVIOUS_PERF_EOD_VERSION}.", status: "Preparing environment for shake and bake.", webhookUrl: "${env.TEAMS_CHANNEL}", color: "007cc3"
+            }
+          }
+        }
+
+        stage ('ABLGM Test - Shake') {
+          steps {
+            sh """
+              java -jar eod-cli.jar version update --app='${env.PERF_APPLICATION}' --version='Base' --status=STABLE --token=${env.EOD_TOKEN} --host=${EOD_SERVICE_URL}
+              java -jar eod-cli.jar version shake --source-app='${env.PERF_APPLICATION}' --source-name='Base' --target-app='${env.PERF_APPLICATION}' --target-name='${params.NEW_VERSION}' --token=${env.EOD_TOKEN} --host=${EOD_SERVICE_URL}
+            """
+          }
+        }
+
+        stage ('ABLGM Test - Provision Master') {
+          when {
+            expression {
+              "${params.SNAPSHOT_ONLY}" != "true"
+            }
+          }
+          steps {
+            lock (resource: "shake-n-bake-${env.LOCK_NAME}") {
+              script {
+                def master = getMasterEnvironment(this, "${env.PERF_APPLICATION}","${params.NEW_VERSION}","${EOD_SERVICE_URL}","${env.EOD_TOKEN}")
+                /*
+                 * Master has not been created yet, schedule a provision attempt as normal.  If it fails, try to reset the master at least once
+                 */
+                if (master == null) {
+                  try {
+                      master = provisionEnvironment(this, "${env.PERF_APPLICATION}","${params.NEW_VERSION}","Automated Jenkins Build: ${env.BUILD_ID} Validation", "${EOD_SERVICE_URL}","${env.EOD_TOKEN}")
+                  } catch (Exception e) {
+                      master = resetMaster(this, "${env.PERF_APPLICATION}","${params.NEW_VERSION}","${params.ENVIRONMENT}", "${EOD_SERVICE_URL}","${env.EOD_TOKEN}")
+                  }
+                } else if ("${master?.status}" == 'FAILED') {
+                  master = resetMaster(this, "${env.PERF_APPLICATION}","${params.NEW_VERSION}","${params.ENVIRONMENT}", "${EOD_SERVICE_URL}","${env.EOD_TOKEN}")
+                } else if ("${master?.name}".startsWith('mstr-') && "${master?.status}" == 'AVAILABLE') {
+                  echo "Existing master [${master?.name}] is available. Moving on..."
+                } else {
+                  throw new IllegalStateException("Existing master [${master?.name}] is not in a viable state [${master?.status}].")
+                }
+
+                def format = "%-17s %20s %22s\n"
+                builder = new StringBuilder()
+                builder.append('Environment ID:   ' + master.id + '\n')
+                builder.append('Environment Name: ' + master.name + '\n')
+                builder.append('\n')
+                builder.append(String.format(format, 'Name', 'IP Address', 'Role'))
+                builder.append(String.format(format, '-----------------', '--------------------','----------------------'))
+                master.devices.each { device ->
+                  echo "${device}"
+                  builder.append(String.format(format, "${device.name}", "${device.ip_address}", "${device.role}"))
+                }
+
+                masterEnvFormatted = builder
+
+              }
+            }
+          }
+        }
+
+        stage ('ABLGM Test - Bake') {
+          when {
+            expression {
+              "${params.SNAPSHOT_ONLY}" != "true"
+            }
+          }
+          steps {
+            script {
+
+              try {
+                sh """
+                  java -jar eod-cli.jar version bake --app='${env.PERF_APPLICATION}' --version='${params.NEW_VERSION}' --token=${env.EOD_TOKEN} --host=${EOD_SERVICE_URL}
+                """
+              } catch (Exception e) {
+                  echo 'Exception occurred baking the master: ' + e.toString()
+                  echo 'Attempting to reset status and bake again...'
+                  sh """
+                    java -jar eod-current-process.jar override-status --app='${env.PERF_APPLICATION}' --version='${params.NEW_VERSION}' --environment='${params.ENVIRONMENT}' --status='READY'
+                  """
+                  sh """
+                    java -jar eod-cli.jar version bake --app='${env.PERF_APPLICATION}' --version='${params.NEW_VERSION}' --token=${env.EOD_TOKEN} --host=${EOD_SERVICE_URL}
+                  """
+              }
+
+              //Verify the version status is in VALIDATING before moving forward
+              def versionListStr = sh(returnStdout: true, script: "java -jar eod-cli.jar version inspect --app='${env.PERF_APPLICATION}' --version='${params.NEW_VERSION}' --token=${env.EOD_TOKEN} --host=${EOD_SERVICE_URL}").trim()
+              echo "${versionListStr}"
+              def versionList = new JsonSlurperClassic().parseText(versionListStr)
+              if ("${versionList[0]?.status}" != 'VALIDATING') {
+                throw new IllegalStateException("Version is not in validating for [${env.PERF_APPLICATION} - ${params.NEW_VERSION}]. Actual = ${versionList[0]?.status}")
+              }
+            }
+          }
+        }
+
+        stage ('ABLGM Test - Clone') {
+          when {
+            expression {
+              "${params.SNAPSHOT_ONLY}" == "true"
+            }
+          }
+          steps {
+            //Update the images/snapshots from latest version
+            //Manually set the status of the EOD version to VALIDATING
+            sh """
+              java -jar eod-current-process.jar bake-from-master --app='${env.PERF_APPLICATION}' --version='${params.NEW_VERSION}' --sourceApplication='${env.PERF_APPLICATION}' --sourceVersion='${env.PREVIOUS_PERF_EOD_VERSION}' --environment='${params.ENVIRONMENT}'
+            """
+
+            sh """
+              java -jar eod-current-process.jar override-status --app='${env.PERF_APPLICATION}' --version='${params.NEW_VERSION}' --environment='${params.ENVIRONMENT}' --status='VALIDATING'
+            """
+          }
+        }
+
+        stage ('ABLGM Test - Update Actifio Snapshots') {
+          steps {
+            //Update the 5 snapshot properties in the blueprint.
+            sh """
+              java -jar eod-current-process.jar put-property --app='${env.PERF_APPLICATION}' --version='${env.NEW_VERSION}' --environment='${params.ENVIRONMENT}' --role='${env.APP_ROLE}' --key='eod.taas.actifio.mounts.fs.cerner.properties.source.backup' --value='${SNAPSHOT_NAME}'
+              java -jar eod-current-process.jar put-property --app='${env.PERF_APPLICATION}' --version='${env.NEW_VERSION}' --environment='${params.ENVIRONMENT}' --role='${env.APP_ROLE}' --key='eod.taas.actifio.mounts.fs.cerner.csm.properties.source.backup' --value='${SNAPSHOT_NAME}'
+              java -jar eod-current-process.jar put-property --app='${env.PERF_APPLICATION}' --version='${env.NEW_VERSION}' --environment='${params.ENVIRONMENT}' --role='${env.APP_ROLE}' --key='eod.taas.actifio.mounts.fs.cerner.frontend.wh.properties.source.backup' --value='${SNAPSHOT_NAME}'
+              java -jar eod-current-process.jar put-property --app='${env.PERF_APPLICATION}' --version='${env.NEW_VERSION}' --environment='${params.ENVIRONMENT}' --role='${env.DB_ROLE}' --key='eod.taas.actifio.mounts.ora.db.admin.source.backup' --value='${SNAPSHOT_NAME}'
+              java -jar eod-current-process.jar put-property --app='${env.PERF_APPLICATION}' --version='${env.NEW_VERSION}' --environment='${params.ENVIRONMENT}' --role='${env.DB_ROLE}' --key='eod.taas.actifio.mounts.ora.db.clinical.source.backup' --value='${SNAPSHOT_NAME}'
+            """
+          }
+        }
+
+        stage ('ABLGM Test - Validation') {
+            steps {
+              script {
+                def data = null
+                def count = 1
+
+                while (data == null && count < 4) {
+                  try {
+                    data = provisionEnvironment(this, "${env.PERF_APPLICATION}","${params.NEW_VERSION}","Automated Jenkins Build: ${env.BUILD_ID} Validation", "${EOD_SERVICE_URL}","${env.EOD_TOKEN}")
+
+                    fatClient = "-"
+                    validationEnvUUID = data.id
+
+                    def format = "%-17s %20s %22s\n"
+                    builder = new StringBuilder()
+                    builder.append(String.format(format, 'Name', 'IP Address', 'Role'))
+                    builder.append(String.format(format, '-----------------', '--------------------','----------------------'))
+                    data.devices.each { device ->
+                      echo "${device}"
+                      builder.append(String.format(format, "${device.name}", "${device.ip_address}", "${device.role}"))
+                      if ("${device.role}" == "FatClient") {
+                        fatClient = device.host
+                      }
+                    }
+                  } catch (Exception e) {
+                      echo "Exception occurred provisioning validation environment. Attempt ${count}: " + e.toString()
+                      count++
+                  }
+                }
+
+                if (data == null) {
+                  throw new IllegalStateException("Unable to validate application version [${env.PERF_APPLICATION} - ${params.NEW_VERSION}].")
+                }
+		
+		 office365ConnectorSend message: "**_[${env.PERF_APPLICATION}] - ${params.NEW_VERSION}:_**  Test environment [${data.name}] successfully provisioned and requires validation.\n\n<pre>${builder}</pre>", status: "Awaiting Environment Validation", webhookUrl: "${env.TEAMS_CHANNEL}", color: "ffe070"
+                 def response = input(submitterParameter: 'submitter', message: "[${env.PERF_APPLICATION}] - ${params.NEW_VERSION} Does the test environment appear healthy?")
+                 office365ConnectorSend message: "**_[${env.PERF_APPLICATION}] - ${params.NEW_VERSION}:_**  Test environment was validated by ${response}.", status: "Marking new version as available", webhookUrl: "${env.TEAMS_CHANNEL}", color: "007cc3"
+
+              }
+            }
+        }
+
+        stage ('ABLGM Prep - Clone Test') {
+             steps {
+               //Cross shake from the prep environment
+               //Update images from the prep application and images
+               //Update the 5 snapshot properties in the blueprint.
+               //Update version status to VALIDATING
+               sh """
+                 java -jar eod-cli.jar version update --app='${env.PREP_APPLICATION}' --version='Base' --status=STABLE --token=${env.EOD_TOKEN} --host=${EOD_SERVICE_URL}
+                 java -jar eod-cli.jar version shake --source-app='${env.PREP_APPLICATION}' --source-name='Base' --target-app='${env.PREP_APPLICATION}' --target-name='${params.NEW_VERSION}' --token=${env.EOD_TOKEN} --host=${EOD_SERVICE_URL}
+               """
+               sh """
+                 java -jar eod-current-process.jar bake-from-master --app='${env.PREP_APPLICATION}' --version='${params.NEW_VERSION}' --sourceApplication='${env.PERF_APPLICATION}' --sourceVersion='${params.NEW_VERSION}' --environment='${params.ENVIRONMENT}'
+               """
+
+               sh """
+                 java -jar eod-current-process.jar put-property --app='${env.PREP_APPLICATION}' --version='${env.NEW_VERSION}' --environment='${params.ENVIRONMENT}' --role='${env.APP_ROLE}' --key='eod.taas.actifio.mounts.fs.cerner.properties.source.backup' --value='${SNAPSHOT_NAME}'
+                 java -jar eod-current-process.jar put-property --app='${env.PREP_APPLICATION}' --version='${env.NEW_VERSION}' --environment='${params.ENVIRONMENT}' --role='${env.APP_ROLE}' --key='eod.taas.actifio.mounts.fs.cerner.csm.properties.source.backup' --value='${SNAPSHOT_NAME}'
+                 java -jar eod-current-process.jar put-property --app='${env.PREP_APPLICATION}' --version='${env.NEW_VERSION}' --environment='${params.ENVIRONMENT}' --role='${env.APP_ROLE}' --key='eod.taas.actifio.mounts.fs.cerner.frontend.wh.properties.source.backup' --value='${SNAPSHOT_NAME}'
+                 java -jar eod-current-process.jar put-property --app='${env.PREP_APPLICATION}' --version='${env.NEW_VERSION}' --environment='${params.ENVIRONMENT}' --role='${env.DB_ROLE}' --key='eod.taas.actifio.mounts.ora.db.admin.source.backup' --value='${SNAPSHOT_NAME}'
+                 java -jar eod-current-process.jar put-property --app='${env.PREP_APPLICATION}' --version='${env.NEW_VERSION}' --environment='${params.ENVIRONMENT}' --role='${env.DB_ROLE}' --key='eod.taas.actifio.mounts.ora.db.clinical.source.backup' --value='${SNAPSHOT_NAME}'
+               """
+
+               sh """
+                 java -jar eod-current-process.jar override-status --app='${env.PREP_APPLICATION}' --version='${params.NEW_VERSION}' --environment='${params.ENVIRONMENT}' --status='VALIDATING'
+               """
+             }
+        }
+
+       stage ('Both - Make Available') {
+            steps {
+              sh """
+                java -jar eod-cli.jar version update --app='${env.PERF_APPLICATION}' --version='${params.NEW_VERSION}' --status=STABLE --token=${env.EOD_TOKEN} --host=${EOD_SERVICE_URL}
+              """
+
+              sh """
+                java -jar eod-cli.jar version update --app='${env.PREP_APPLICATION}' --version='${params.NEW_VERSION}' --status=STABLE --token=${env.EOD_TOKEN} --host=${EOD_SERVICE_URL}
+              """
+
+              office365ConnectorSend message: "**_[${env.PERF_APPLICATION}] - ${params.NEW_VERSION}:_**  Marked version as stable.", status: "Preparing to deactivate previous version ${env.PREVIOUS_PERF_EOD_VERSION}.", webhookUrl: "${env.TEAMS_CHANNEL}", color: "007cc3"
+            }
+       }
+
+       // stage ('Both - Prepare Previous Version') {
+       //      steps {
+       //        script {
+       //
+       //          sh """
+       //            java -jar eod-current-process.jar override-status --app='${env.PERF_APPLICATION}' --version='${env.PREVIOUS_PERF_EOD_VERSION}' --environment='${params.ENVIRONMENT}' --status='RETIRED'
+       //          """
+       // 
+       //          sh """
+       //            java -jar eod-current-process.jar override-status --app='${env.PREP_APPLICATION}' --version='${env.PREVIOUS_PREP_EOD_VERSION}' --environment='${params.ENVIRONMENT}' --status='RETIRED'
+       //          """
+       //        }
+       //      }
+       // }
+
+       stage ('Announcements') {
+            steps {
+              script {
+                emailext (
+                    subject: "Environments On Demand : ${params.ENVIRONMENT} - New Application Announcement",
+                    body: """[Application Version Available: ${env.PREP_APPLICATION}] - The ${params.NEW_VERSION} application version is now available.""",
+                    mimeType: 'text/html',
+                    to: "deven.hammerschmidt@cerner.com",
+                    from: "no-reply@cerner.com"
+                )
+
+                yammerMessage = "<pre>[Application Version Available: ${env.PREP_APPLICATION}] The ${params.NEW_VERSION} application version is now available."
+                yammerMessage = yammerMessage + "</pre>"
+
+                office365ConnectorSend message: "**_[${env.PREP_APPLICATION}] - ${params.NEW_VERSION}:_**  Notification post to yammer was made.  Yammer message:\n\n\n\n ${yammerMessage}", status: "Yammer update email sent", webhookUrl: "${env.TEAMS_CHANNEL}", color: "ffe070"
+              }
+            }
+       }
+
+       stage ('ABLGM Test - Configure Pooling') {
+         when {
+           expression {
+             "${params.POOL_SIZE}" != "0"
+           }
+         }
+        steps {
+          script {
+              sh """
+                java -jar eod-current-process.jar set-pool-policy --app='${env.PERF_APPLICATION}' --version='${params.NEW_VERSION}' --environment="${params.ENVIRONMENT}" --token='${env.EOD_TOKEN}' --pool-size=${params.POOL_SIZE} --storyId='${env.CHRONICLE_STORY_ID}' --storySecret='${env.CHRONICLE_STORY_SECRET}' --reset-previous
+              """
+          }
+        }
+       }
+
+    }
+    post {
+      always {
+        script {
+          if ("${validationEnvUUID}" != "") {
+            sh "java -jar eod-cli.jar environment destroy --ids=${validationEnvUUID} --token=${env.EOD_TOKEN} --host=${EOD_SERVICE_URL}"
+          }
+        }
+      }
+      failure {
+        office365ConnectorSend message: "**_[${env.PERF_APPLICATION}] - ${params.NEW_VERSION}:_**  Shake and bake process failed and requires attention.", status: "Shake and bake process failed.", webhookUrl: "${env.TEAMS_FAILURE_CHANNEL}", color: "ff0000"
+      }
+      success {
+        office365ConnectorSend message: "**_[${env.PERF_APPLICATION}] - ${params.NEW_VERSION}:_**  Shake and bake process completed successfully.", status: "Version completed.", webhookUrl: "${env.TEAMS_CHANNEL}", color: "78c346"
+      }
+    }
+}

@@ -1,0 +1,60 @@
+pipeline {
+  agent {
+    node {
+      label 'shake-n-bake'
+    }
+  }
+
+  parameters {
+    string(name: 'NEW_VERSION', description: 'The new version to create', defaultValue: '<new name>')
+  }
+
+  stages {
+    stage ("Initializing") {
+      steps {
+        buildName "#${BUILD_NUMBER}-${params.NEW_VERSION}"
+      }
+    }
+
+    stage ("Shake and Bake") {
+      steps {
+        build job: 'shake-n-bake', propagate: true, wait: false, parameters: [
+        [$class: 'StringParameterValue', name: 'ENVIRONMENT', value: 'PRODUCTION'],
+        [$class: 'StringParameterValue', name: 'APPLICATION', value: 'Continuous Availability'],
+        [$class: 'StringParameterValue', name: 'BASE_VERSION', value: 'Base'],
+        [$class: 'StringParameterValue', name: 'PREVIOUS_VERSION', value: "-"],
+        [$class: 'StringParameterValue', name: 'NEW_VERSION', value: "${params.NEW_VERSION}"],
+        [$class: 'BooleanParameterValue', name: 'PROMPT_ENV_MODIFICATIONS', value: 'true'],
+        [$class: 'BooleanParameterValue', name: 'PROMPT_ENV_VERIFICATION', value: 'false'],
+        [$class: 'StringParameterValue', name: 'PREVIOUS_VERSION_OPERATION', value: 'IGNORE'],
+        [$class: 'StringParameterValue', name: 'RESOURCE_LOCK_NAME', value: '-'],
+        [$class: 'StringParameterValue', name: 'POOLING_POLICY', value: 'NONE'],
+        [$class: 'StringParameterValue', name: 'POOL_SIZE', value: '5'],
+        [$class: 'TextParameterValue', name: 'PRIMARY_MASTER_CONFIG', value:
+'''---
+config:
+  domain: S18VX
+  millennium_username: system
+  millennium_password: system
+  masters:
+    - role: millennium-app
+      ip: 10.171.128.230
+      machine: ips18vx01-2018.01.01CA-BASE
+    - role: millennium-db
+      ip: 10.171.128.231
+      machine: ips18vxdb01-2018.01.01CA-BASE
+    - role: websphere-odr
+      ip: 10.171.128.233
+      machine: ips18vxodr01-2018.01.01CA-BASE
+    - role: websphere-app
+      ip: 10.171.128.234
+      machine: ips18vxapp01-2018.01.01CA-BASE
+    - role: fat-client
+      ip: 10.171.128.235
+      machine: ips18vxwin01-2018.01.01CA-BASE
+''']
+        ]
+      }
+    }
+  }
+}

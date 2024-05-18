@@ -1,0 +1,105 @@
+import groovy.json.JsonSlurperClassic
+import groovy.json.JsonSlurper
+import groovy.json.JsonOutput
+import static java.util.Calendar.*
+import groovy.time.TimeCategory
+import java.util.TimeZone
+import java.text.SimpleDateFormat
+
+def static getApplicationVersion(final String baseUrl, final String token, final String applicationId) {
+  def conn = new URL(baseUrl + "/applications/${applicationId}/versions/latest").openConnection();
+  conn.setRequestProperty("Authorization", "Bearer ${token}")
+  def response = conn.getResponseCode();
+
+  if (!200.equals(response)) {
+    throw new IllegalStateException("Unable to retrieve latest application at [${baseUrl}/applications/${applicationId}/versions/latest].")
+  }
+
+  def results = new JsonSlurperClassic().parseText("${conn.getInputStream().getText()}")
+  return results.version;
+}
+
+pipeline {
+    agent {
+	  node {
+	    label 'shake-n-bake'
+	  }
+	}
+
+  parameters {
+      string(name: 'APPLICATION', description: 'The application to refresh', defaultValue: '<name>')
+      string(name: 'JENKINS_JOB', description: 'The relative path to the jenkins job to kick off.  Requires that NEW_VERSION and PREVIOUS_VERSION parameters are available.',defaultValue: '-')
+  }
+
+  environment {
+    EOD_SERVICE_URL = "http://ipdevenv.ip.devcerner.net/eod-service"
+    EOD_TOKEN = "Po7F6pn3FzxPtl60Atqb9lV19ngfgPddo3F5m661dAMqP3RFXi6ZvwHu8paiixsO2Umzy6DVp8kikv1B0yZfuoIi5ORisq2rV1s6kFhk9kUtexNNjmWGrak4dhGvtu92F5"
+  }
+
+  stages {
+    stage ("Install Tools") {
+      steps {
+        artifactResolver artifacts: [
+          artifact(
+            groupId: 'com.cerner.abilities',
+            artifactId: 'eod-cli',
+            classifier: 'jar-with-dependencies',
+            extension: 'jar',
+            version: '1.3',
+            targetFileName: './eod-cli.jar'
+          )
+        ],
+        failOnError: true,
+        snapshotUpdatePolicy: 'always',
+        targetDirectory: WORKSPACE
+      }
+    }
+
+    stage ("Resolve Previous Version") {
+      steps {
+        script {
+          def envObj = sh(returnStdout: true, script: "java -jar eod-cli.jar application inspect --app='${params.APPLICATION}' --token=${env.EOD_TOKEN} --host=${env.EOD_SERVICE_URL}").trim()
+          echo "${envObj}"
+          def data = new JsonSlurperClassic().parseText(envObj)
+          def app = data[0]
+          def version = getApplicationVersion("${env.EOD_SERVICE_URL}", "${env.EOD_TOKEN}", app.id)
+
+          previousVersion = version.name
+        }
+      }
+    }
+
+    stage ("Generate New Version") {
+      steps {
+        script {
+          def date = new Date()
+          newVersion = "Weekly-Refresh-${date.format('MM/dd/yyyy')}"
+        }
+      }
+    }
+
+      stage ("Shake and Bake") {
+          steps {
+            echo "Previous Version: ${previousVersion}"
+            echo "New Version: ${newVersion}"
+
+            script {
+              if ("${previousVersion}" == "") {
+                throw new IllegalStateException("Previous version not detected.")
+              }
+
+              if ("${newVersion}" == "") {
+                throw new IllegalStateException("New version not detected.")
+              }
+            }
+
+    				build job: "${params.JENKINS_JOB}", propagate: false, wait: false, parameters: [
+              [$class: 'StringParameterValue', name: 'PREVIOUS_VERSION', value: "${previousVersion}"],
+    					[$class: 'StringParameterValue', name: 'NEW_VERSION', value: "${newVersion}"],
+              [$class: 'BooleanParameterValue', name: 'PROMPT_ENV_MODIFICATIONS', value: 'false'],
+    					[$class: 'BooleanParameterValue', name: 'PROMPT_ENV_VERIFICATION', value: 'false']
+			      ]
+          }
+      }
+  }
+}

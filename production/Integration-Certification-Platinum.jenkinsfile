@@ -1,0 +1,30 @@
+pipeline {
+  agent {
+    node {
+      label 'shake-n-bake'
+    }
+  }
+
+  parameters {
+    string(name: 'NEW_VERSION', description: 'The new version to create', defaultValue: '<new name>')
+    string(name: 'PREVIOUS_VERSION', description: 'The previous version to retire', defaultValue: 'latest')
+  }
+
+  stages {
+    stage ("Initializing") {
+      steps {
+        buildName "#${BUILD_NUMBER}-${params.NEW_VERSION}"
+      }
+    }
+    stage ("Shake and Bake") {
+      steps {
+        build job: 'chips-n-guac', propagate: true, wait: true, parameters: [
+        [$class: 'StringParameterValue', name: 'APPLICATION', value: 'Integration-Certification-Platinum'],
+        [$class: 'StringParameterValue', name: 'BASE_VERSION', value: 'BASE'],
+        [$class: 'StringParameterValue', name: 'PREVIOUS_VERSION', value: "${params.PREVIOUS_VERSION}"],
+        [$class: 'StringParameterValue', name: 'NEW_VERSION', value: "${params.NEW_VERSION}"]
+			  ]
+      }
+    }
+  }
+}

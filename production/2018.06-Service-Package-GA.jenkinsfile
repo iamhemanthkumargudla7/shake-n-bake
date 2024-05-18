@@ -1,0 +1,59 @@
+pipeline {
+  agent {
+    node {
+      label 'shake-n-bake'
+    }
+  }
+
+  parameters {
+    string(name: 'NEW_VERSION', description: 'The new version to create', defaultValue: '<new name>')
+  }
+
+  stages {
+    stage ("Initializing") {
+      steps {
+        buildName "#${BUILD_NUMBER}-${params.NEW_VERSION}"
+      }
+    }
+    stage ("Shake and Bake") {
+      steps {
+        build job: 'shake-n-bake', propagate: true, wait: false, parameters: [
+        [$class: 'StringParameterValue', name: 'ENVIRONMENT', value: 'PRODUCTION'],
+        [$class: 'StringParameterValue', name: 'APPLICATION', value: '2018.06-Service-Package-GA'],
+        [$class: 'StringParameterValue', name: 'BASE_VERSION', value: 'Base'],
+        [$class: 'StringParameterValue', name: 'PREVIOUS_VERSION', value: "-"],
+        [$class: 'StringParameterValue', name: 'NEW_VERSION', value: "${params.NEW_VERSION}"],
+        [$class: 'BooleanParameterValue', name: 'PROMPT_ENV_MODIFICATIONS', value: 'true'],
+        [$class: 'BooleanParameterValue', name: 'PROMPT_ENV_VERIFICATION', value: 'true'],
+        [$class: 'StringParameterValue', name: 'PREVIOUS_VERSION_OPERATION', value: 'IGNORE'],
+        [$class: 'StringParameterValue', name: 'POOLING_POLICY', value: 'NONE'],
+        [$class: 'StringParameterValue', name: 'POOL_SIZE', value: '5'],
+        [$class: 'StringParameterValue', name: 'RESOURCE_LOCK_NAME', value: '-'],
+        [$class: 'TextParameterValue', name: 'PRIMARY_MASTER_CONFIG', value:
+'''---
+config:
+  domain: S18VF
+  millennium_username: system
+  millennium_password: system
+  masters:
+    - role: millennium-app
+      ip: 10.171.25.162
+      machine: ips18vf
+    - role: millennium-db
+      ip: 10.171.25.164
+      machine: ips18vfdb
+    - role: websphere-odr
+      ip: 10.171.25.170
+      machine: ips18vfodr
+    - role: websphere-app
+      ip: 10.171.25.172
+      machine: ips18vfapp
+    - role: fat-client
+      ip: 10.171.25.174
+      machine: ips18vfwin
+''']
+	      ]
+      }
+    }
+  }
+}

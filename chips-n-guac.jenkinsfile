@@ -1,0 +1,143 @@
+import groovy.json.JsonSlurperClassic
+import static java.util.Calendar.*
+import groovy.time.TimeCategory
+import groovy.json.JsonOutput
+
+def static getAccessToken(final script, final String url, final String token) {
+  def accessTokenStr = script.sh(returnStdout: true, script: """
+    curl --location --request POST '${url}/iaas/api/login' \
+    --header 'Content-Type: application/json' \
+    --data '{
+      "refreshToken": "${token}"
+    }'
+    """).trim()
+
+  def accessToken = new JsonSlurperClassic().parseText(accessTokenStr).token
+  script.echo "${accessToken}"
+  return accessToken;
+}
+
+def static submitRequest(final script, final String url, final String token, final String catalogId, final body) {
+
+  def responseStr = script.sh(returnStdout: true, script: """
+    curl --location --request POST '${url}/catalog/api/items/${catalogId}/request' \
+    --header 'Authorization: Bearer ${token}' \
+    --header 'Content-Type: application/json' \
+    --data '${JsonOutput.toJson(body)}'
+    """).trim()
+
+  script.echo "${responseStr}"
+  def response = new JsonSlurperClassic().parseText(responseStr);
+  return response;
+}
+
+def static getLatestVersion(final script, final String url, final String token, final String application) {
+
+  def responseStr = script.sh(returnStdout: true, script: """
+    curl --location --request POST '${url}/vco/api/actions/com.cerner.service.orchestration.millennium.configuration/getPreviousVersionForCreation/executions' \
+    --header 'Authorization: Bearer ${token}' \
+    --header 'Content-Type: application/json' \
+    --data '{
+      "parameters": [
+          {
+              "scope":  "local",
+              "name":  "application",
+              "value":  {
+                              "string":  {
+                                          "value":  "${application}"
+                                      }
+                          },
+              "type":  "string"
+          }
+      ],
+      "async-execution":  "false"
+    }'
+    """).trim()
+
+  script.echo "${responseStr}"
+  def response = new JsonSlurperClassic().parseText(responseStr);
+  return response.value.string.value;
+}
+
+pipeline {
+    agent {
+      node {
+        label 'eod-process'
+      }
+    }
+
+    parameters {
+        string(name: 'APPLICATION', description: 'The application name',defaultValue: '-')
+        string(name: 'BASE_VERSION', description: 'The base version to shake off of', defaultValue: 'BASE')
+        string(name: 'PREVIOUS_VERSION', description: 'The previous version to retire',defaultValue: '-')
+        string(name: 'NEW_VERSION', description: 'The name of the new version to create from BASE_VERSION',defaultValue: 'new-version-name')
+    }
+
+    stages {
+        // Kicks off the current build process
+        stage ('Initializing') {
+          steps {
+            script {
+              echo "Initializing parameters for pipeline."
+
+              env.VRA_SERVICE_URL = "https://cerncvirvra.northamerica.cerner.net"
+              env.CATALOG_ID = "1c64caea-9a96-359c-85a8-45973dd51b97"
+              env.PROJECT_ID = "818eba57-ea1b-49cf-a7c0-db1a653fd41d"
+              env.TEAMS_CHANNEL = "https://cernerprod.webhook.office.com/webhookb2/ccecd4ae-bc04-4a63-b962-c8c6186c66a7@fbc493a8-0d24-4454-a815-f4ca58e8c09d/IncomingWebhook/de62a82859a2442fa4126f4eb823f487/548b6cd9-0708-43db-89c4-bc6a4b95b271"
+              env.TEAMS_FAILURE_CHANNEL = "https://cernerprod.webhook.office.com/webhookb2/ccecd4ae-bc04-4a63-b962-c8c6186c66a7@fbc493a8-0d24-4454-a815-f4ca58e8c09d/IncomingWebhook/b4e9df1b0ab6492485b233111e094808/548b6cd9-0708-43db-89c4-bc6a4b95b271"
+              // This is the Refresh Token for svckraang user. This gets expired in 90 days which is default refreshToken validity on VRA>
+              env.TOKEN = "eH51IZShguoozREBn4eDUR1Z5fYLuiqL"
+
+              buildName "#${BUILD_NUMBER}-${params.NEW_VERSION}"
+
+              echo "VRA URL:       ${env.VRA_SERVICE_URL}"
+            }
+          }
+        }
+
+        stage ('Schedule Job') {
+            steps {
+              script {
+
+
+                def accessToken = getAccessToken(this, "${env.VRA_SERVICE_URL}", "${env.TOKEN}")
+                def previousVersion = "${params.PREVIOUS_VERSION}"
+
+                if ("latest" == "${params.PREVIOUS_VERSION}") {
+                  previousVersion = getLatestVersion(this, "${env.VRA_SERVICE_URL}", "${accessToken}","${params.APPLICATION}")
+                }
+
+                if ("-" == "${params.PREVIOUS_VERSION}") {
+                  previousVersion = ""
+                }
+
+                def payload = [
+                  "deploymentName":"CREATE-VERSION-${params.APPLICATION}-${params.NEW_VERSION}",
+                  "projectId": "${env.PROJECT_ID}",
+                  "inputs": [
+                    "domain":"-",
+                    "application":"${params.APPLICATION}",
+                    "new_version":"${params.NEW_VERSION}",
+                    "source_version": "${params.BASE_VERSION}",
+                    "previous_version":"${previousVersion}"
+                  ]
+                ];
+
+                echo "${JsonOutput.toJson(payload)}"
+                def deployments = submitRequest(this, "${env.VRA_SERVICE_URL}", "${accessToken}","${env.CATALOG_ID}", payload)
+              }
+
+            }
+        }
+
+    }
+
+    post {
+      failure {
+        office365ConnectorSend message: "**_[${params.APPLICATION}] - ${params.NEW_VERSION}:_**  Chips-n-guac process failed to be scheduled.", status: "Chips-n-guac process submission failed.", webhookUrl: "${env.TEAMS_FAILURE_CHANNEL}", color: "ff0000"
+      }
+      success {
+        office365ConnectorSend message: "**_[${params.APPLICATION}] - ${params.NEW_VERSION}:_**  Chips-n-guac submitted successfully.", status: "Version submitted successfully.", webhookUrl: "${env.TEAMS_CHANNEL}", color: "78c346"
+      }
+    }
+}

@@ -1,0 +1,25 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'NEW_VERSION', description: 'The base version to shake off of', defaultValue: '<new name>')
+        string(name: 'PREVIOUS_VERSION', description: 'The previous version to retire',defaultValue: '-')
+	}
+
+    stages {
+        stage ("Shake and Bake") {
+            steps {
+      				build job: '../dev-shake-n-bake', propagate: false, wait: false, parameters: [
+      					[$class: 'StringParameterValue', name: 'ENVIRONMENT', value: 'CERT'],
+      					[$class: 'StringParameterValue', name: 'APPLICATION', value: 'aws-tools-integration'],
+      					[$class: 'StringParameterValue', name: 'BASE_VERSION', value: 'Master'],
+      					[$class: 'StringParameterValue', name: 'PREVIOUS_VERSION', value: "${params.PREVIOUS_VERSION}"],
+      					[$class: 'StringParameterValue', name: 'NEW_VERSION', value: "${params.NEW_VERSION}"],
+      					[$class: 'BooleanParameterValue', name: 'PROMPT_ENV_MODIFICATIONS', value: 'true'],
+      					[$class: 'StringParameterValue', name: 'PREVIOUS_VERSION_OPERATION', value: 'IGNORE'],
+      					[$class: 'TextParameterValue', name: 'MASTER_IPS', value: '']
+				      ]
+            }
+        }
+    }
+}

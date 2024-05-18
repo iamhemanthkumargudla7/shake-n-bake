@@ -1,0 +1,61 @@
+pipeline {
+  agent {
+    node {
+      label 'shake-n-bake'
+    }
+  }
+
+  parameters {
+    string(name: 'NEW_VERSION', description: 'The new version to create', defaultValue: '<new name>')
+    string(name: 'PREVIOUS_VERSION', description: 'The previous version to deactivate',defaultValue: '-')
+  }
+
+  stages {
+    stage ("Initializing") {
+      steps {
+        buildName "#${BUILD_NUMBER}-${params.NEW_VERSION}"
+      }
+    }
+    stage ("Shake and Bake") {
+      steps {
+        build job: 'shake-n-bake', propagate: true, wait: false, parameters: [
+        [$class: 'StringParameterValue', name: 'ENVIRONMENT', value: 'PRODUCTION'],
+        [$class: 'StringParameterValue', name: 'APPLICATION', value: 'SOLM64-OL7-BLR'],
+        [$class: 'StringParameterValue', name: 'BASE_VERSION', value: 'Base'],
+        [$class: 'StringParameterValue', name: 'PREVIOUS_VERSION', value: "${params.PREVIOUS_VERSION}"],
+        [$class: 'StringParameterValue', name: 'NEW_VERSION', value: "${params.NEW_VERSION}"],
+        [$class: 'BooleanParameterValue', name: 'PROMPT_ENV_MODIFICATIONS', value: 'false'],
+        [$class: 'BooleanParameterValue', name: 'PROMPT_ENV_VERIFICATION', value: 'false'],
+        [$class: 'BooleanParameterValue', name: 'CREATE_MEDIC_SNAPSHOTS', value: 'false'],
+        [$class: 'StringParameterValue', name: 'PREVIOUS_VERSION_OPERATION', value: 'DEACTIVATE'],
+        [$class: 'StringParameterValue', name: 'POOLING_POLICY', value: 'NONE'],
+        [$class: 'StringParameterValue', name: 'POOL_SIZE', value: '5'],
+        [$class: 'StringParameterValue', name: 'RESOURCE_LOCK_NAME', value: '-'],
+        [$class: 'TextParameterValue', name: 'PRIMARY_MASTER_CONFIG', value:
+'''---
+config:
+  domain: SOLM64
+  millennium_username: system
+  millennium_password: system
+  masters:
+    - role: millennium-app
+      ip: 10.181.32.120
+      machine: ipsolmastr64-blr
+    - role: millennium-db
+      ip: 10.181.32.101
+      machine: ipsolmastr64db-blr
+    - role: websphere-odr
+      ip: 10.181.32.102
+      machine: ipsolmastr64odr-blr
+    - role: websphere-app
+      ip: 10.181.32.103
+      machine: ipsolmastr64app-blr
+    - role: fat-client
+      ip: 10.181.32.104
+      machine: ipsolmastr64win-blr
+''']
+	      ]
+      }
+    }
+  }
+}
