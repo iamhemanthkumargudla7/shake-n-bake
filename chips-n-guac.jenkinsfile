@@ -86,7 +86,7 @@ pipeline {
               env.TEAMS_CHANNEL = "https://cernerprod.webhook.office.com/webhookb2/ccecd4ae-bc04-4a63-b962-c8c6186c66a7@fbc493a8-0d24-4454-a815-f4ca58e8c09d/IncomingWebhook/de62a82859a2442fa4126f4eb823f487/548b6cd9-0708-43db-89c4-bc6a4b95b271"
               env.TEAMS_FAILURE_CHANNEL = "https://cernerprod.webhook.office.com/webhookb2/ccecd4ae-bc04-4a63-b962-c8c6186c66a7@fbc493a8-0d24-4454-a815-f4ca58e8c09d/IncomingWebhook/b4e9df1b0ab6492485b233111e094808/548b6cd9-0708-43db-89c4-bc6a4b95b271"
               // This is the Refresh Token for svckraang user. This gets expired in 90 days which is default refreshToken validity on VRA>
-              env.TOKEN = "vateviDjgbB9TtvzFyLaURGVBK2OpzVV"
+              env.TOKEN = "NO TOKEN"
 		###Hemanth Added this line
               buildName "#${BUILD_NUMBER}-${params.NEW_VERSION}"
 
